@@ -2,6 +2,11 @@
 
 **Transform academic papers into adorable manga with AI**
 
+<p align="center">
+  <img src="docs/demo1.png" width="45%" alt="Demo Panel 1"/>
+  <img src="docs/demo2.png" width="45%" alt="Demo Panel 2"/>
+</p>
+
 Prism is an open-source tool that converts complex academic papers (PDFs) into engaging, easy-to-understand manga-style comics. Powered by Nano Banana Pro (Gemini), it makes learning fun and accessible for everyone.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
