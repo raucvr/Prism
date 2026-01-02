@@ -21,7 +21,7 @@ const themes: ThemeOption[] = [
     emoji: "☁️",
     color: "bg-sky-100 border-sky-300 hover:bg-sky-200",
     description: "Original cute characters by Prism",
-    style: "Chibikawa style, original cute creatures (Pip puppy, Kumomo cloud, Pippin hedgehog), pastel colors, soft lines",
+    style: "Chibikawa style, original cute creatures (papi, kumo, nezu), pastel colors, soft lines",
   },
   {
     id: "chiikawa",

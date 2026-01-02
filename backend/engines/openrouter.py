@@ -234,8 +234,8 @@ class OpenRouterEngine(BaseEngine):
                     "content": content
                 }
             ],
-            "temperature": 0.8,
-            "max_tokens": 4096
+            "temperature": config.temperature,
+            "max_tokens": config.max_tokens
         }
 
         response = await client.post(url, json=payload)

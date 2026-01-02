@@ -409,25 +409,25 @@ Dialogue:
 - calcifer: "Hmph! But what about the selection bias in the control group?"
 ==="""
         elif self.character_theme == "chibikawa":
-            # 原创角色主题 - 使用参考图片保证角色一致性
+            # 原创角色主题 - 使用参考图片保证角色一致性，不用文字描述外形
             style_name = "Chibikawa (original cute characters)"
-            characters_desc = """Pip (orange puppy, the wise mentor/professor - has floppy ears and cream-colored face markings),
-Kumomo (soft blue cloud creature with a small leaf sprout on head - the curious student),
-Pippin (brown hedgehog-raccoon with soft spikes and striped tail - the skeptic who asks tough questions, loves snacks)"""
+            characters_desc = """papi (the wise mentor/professor),
+kumo (the curious student),
+nezu (the skeptic who asks tough questions)"""
             example_dialogue = """===
 Panel 1
-Characters: pip, kumomo
-Scene: Pip (orange puppy professor) holding the paper, Kumomo (cloud creature) looking curious, in a research lab
+Characters: papi, kumo
+Scene: papi holding the paper, kumo looking curious, in a research lab
 Dialogue:
-- pip: "This study uses a randomized controlled trial with n=2,847 participants..."
-- kumomo: "What was the stratification criteria?"
+- papi: "This study uses a randomized controlled trial with n=2,847 participants..."
+- kumo: "What was the stratification criteria?"
 ===
 Panel 2
-Characters: pip, kumomo, pippin
+Characters: papi, kumo, nezu
 Scene: All three examining a complex diagram on a whiteboard
 Dialogue:
-- pip: "The primary endpoint showed a hazard ratio of 0.73 (95% CI: 0.61-0.87)..."
-- pippin: "But what about the selection bias in the control group?"
+- papi: "The primary endpoint showed a hazard ratio of 0.73 (95% CI: 0.61-0.87)..."
+- nezu: "But what about the selection bias in the control group?"
 ==="""
         else:  # chiikawa (default)
             style_name = "Chiikawa"
@@ -578,6 +578,10 @@ Generate all panels."""
             print(f"[Storyboarder] All parse attempts failed, using fallback")
             return self._create_fallback_storyboard(title, source_text, language)
 
+        # 最终排序确保故事顺序正确
+        panels.sort(key=lambda p: p.panel_number)
+        print(f"[Storyboarder] Final panel order: {[p.panel_number for p in panels[:10]]}...")
+
         return Storyboard(
             title=title or "学习笔记",
             summary="",
@@ -645,6 +649,8 @@ Generate all panels."""
                 )
                 panels.append(panel)
 
+        # 按 panel_number 排序，确保故事顺序正确
+        panels.sort(key=lambda p: p.panel_number)
         return panels
 
     def _dict_to_panel(self, p: dict, default_num: int) -> Optional[Panel]:
@@ -791,21 +797,18 @@ Generate all panels."""
 class CharacterLibrary:
     """角色库 - 主要用于加载参考图片"""
 
-    # Chibikawa 原创角色映射 - 文件名 -> 角色名
+    # Chibikawa 原创角色 - 直接使用 kumo, nezu, papi 作为名字
     CHIBIKAWA_CHARACTERS = {
-        "kumo": "kumomo",      # 云朵生物 - 好奇的学生
-        "kumomo": "kumomo",    # 别名
-        "nezu": "pippin",      # 刺猬小浣熊 - 怀疑论者
-        "pippin": "pippin",    # 别名
-        "papi": "pip",         # 橙色小狗 - 导师教授
-        "pip": "pip",          # 别名
+        "kumo": "kumo",   # 好奇的学生
+        "nezu": "nezu",   # 怀疑论者
+        "papi": "papi",   # 导师教授
     }
 
     # Chibikawa 角色对应的参考图片文件
     CHIBIKAWA_IMAGES = {
-        "kumomo": "kumo.jpeg",
-        "pippin": "nezu.jpeg",
-        "pip": "papi.jpeg",
+        "kumo": "kumo.jpeg",
+        "nezu": "nezu.jpeg",
+        "papi": "papi.jpeg",
     }
 
     def __init__(self):

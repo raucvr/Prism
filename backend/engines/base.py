@@ -95,6 +95,8 @@ class ImageGenerationConfig:
     num_images: int = 1
     style: str = "full_color_manga"
     negative_prompt: str = ""
+    temperature: float = 0.3  # 低温度确保角色一致性
+    max_tokens: int = 4096
 
 
 @dataclass

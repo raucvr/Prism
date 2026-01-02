@@ -283,12 +283,15 @@ class MangaGenerator:
         negative_prompt = getattr(self.config.manga_settings, 'negative_prompt', None)
         if not negative_prompt:
             negative_prompt = "photorealistic, 3d render, anime style, complex shading, multiple panels"
+        # 添加角色一致性相关的负面提示
+        negative_prompt += ", inconsistent characters, characters not matching reference images, different colors from reference, wrong character proportions"
 
         config = ImageGenerationConfig(
             width=width,
             height=height,
             style=self.config.manga_settings.default_style,
-            negative_prompt=negative_prompt
+            negative_prompt=negative_prompt,
+            temperature=0.3  # 低温度确保角色一致性
         )
 
         # 加载参考图片
@@ -358,12 +361,15 @@ class MangaGenerator:
         negative_prompt = getattr(self.config.manga_settings, 'negative_prompt', None)
         if not negative_prompt:
             negative_prompt = "photorealistic, 3d render, anime style, complex shading, blurry, messy lines"
+        # 添加角色一致性相关的负面提示
+        negative_prompt += ", inconsistent characters, characters not matching reference images, changing character designs between panels, different colors from reference, wrong character proportions"
 
         config = ImageGenerationConfig(
             width=width,
             height=height,
             style=self.config.manga_settings.default_style,
-            negative_prompt=negative_prompt
+            negative_prompt=negative_prompt,
+            temperature=0.3  # 低温度确保角色一致性
         )
 
         # 加载参考图片
@@ -521,20 +527,40 @@ class MangaGenerator:
             else:
                 text_note = f"Text: Clear speech bubbles in {lang_name}. Render text LEGIBLY."
 
-        # Chibikawa 原创角色描述
+        # Chibikawa 原创角色描述 - 明确标注每张图片对应哪个角色（顺序必须和加载顺序一致）
         chibikawa_char_desc = ""
         if theme == "chibikawa":
-            chibikawa_char_desc = """
-CRITICAL: These are ORIGINAL characters. Draw them EXACTLY as shown in the reference images:
-- Pip: Orange puppy with floppy ears, cream-colored face markings, round body (the professor/mentor)
-- Kumomo: Soft blue cloud creature with small green leaf sprout on head (the curious student)
-- Pippin: Brown hedgehog-raccoon with soft spikes, striped tail, loves snacks (the skeptic)
+            # 图片加载顺序: kumo.jpeg, nezu.jpeg, papi.jpeg (按 CHIBIKAWA_IMAGES 字典顺序)
+            chibikawa_char_desc = """⚠️ REFERENCE IMAGES PROVIDED - STRICT MAPPING ⚠️
+
+I am attaching 3 reference images in this exact order:
+• Image 1: kumo (the curious student)
+• Image 2: nezu (the skeptic)
+• Image 3: papi (the mentor/professor)
+
+You MUST draw each character EXACTLY as shown in their corresponding reference image.
 """
 
-        # 根据布局生成不同的 prompt
+        # 根据布局生成不同的 prompt - 把角色描述放在最前面
         if num_panels == 1:
-            prompt = f"""{layout_desc}, {style}.
-{chibikawa_char_desc}
+            if theme == "chibikawa":
+                prompt = f"""{chibikawa_char_desc}
+---
+TASK: Create a {layout_desc} in {style} style.
+
+Audience: Nobel Prize scholars who LOVE cute characters.
+Balance: Academic rigor + cute charm.
+
+Panel Content:
+{panels_text}
+
+Background: Simple classroom/lab.
+{text_note}
+
+⚠️ REMINDER: Character appearance MUST match the reference images exactly. Do not improvise."""
+            else:
+                prompt = f"""{layout_desc}, {style}.
+
 Audience: Nobel Prize scholars who LOVE {style.split()[0]} characters.
 Balance: Academic rigor + cute charm.
 
@@ -543,8 +569,26 @@ Balance: Academic rigor + cute charm.
 Background: Simple classroom/lab.
 {text_note}"""
         else:
-            prompt = f"""{layout_desc}, {style}.
-{chibikawa_char_desc}
+            if theme == "chibikawa":
+                prompt = f"""{chibikawa_char_desc}
+---
+TASK: Create a {layout_desc} in {style} style.
+
+Audience: Nobel Prize scholars who LOVE cute characters.
+Balance: Academic rigor + cute charm.
+
+Background: Simple classroom/lab (CONSISTENT across all panels!)
+{text_note}
+
+Panel Layout:
+{panels_text}
+
+Generate {layout_desc} with black borders between panels.
+
+⚠️ REMINDER: Character appearance MUST match the reference images exactly in EVERY panel. Do not improvise."""
+            else:
+                prompt = f"""{layout_desc}, {style}.
+
 Audience: Nobel Prize scholars who LOVE {style.split()[0]} characters.
 Balance: Academic rigor + cute charm.
 
@@ -631,18 +675,31 @@ Generate {layout_desc} with black borders between panels."""
         else:
             text_note = "Render text CLEARLY in speech bubbles."
 
-        # Chibikawa 原创角色描述
+        # Chibikawa 原创角色描述 - 明确标注图片顺序
         chibikawa_char_desc = ""
         if theme == "chibikawa":
-            chibikawa_char_desc = """
-CRITICAL: Draw ORIGINAL characters EXACTLY as shown in reference images:
-- Pip: Orange puppy, floppy ears, cream face (mentor)
-- Kumomo: Blue cloud creature, leaf sprout on head (student)
-- Pippin: Brown hedgehog-raccoon, striped tail (skeptic)
+            # 图片加载顺序: kumo.jpeg, nezu.jpeg, papi.jpeg
+            chibikawa_char_desc = """⚠️ REFERENCE IMAGES - STRICT MAPPING ⚠️
+
+Image 1: kumo | Image 2: nezu | Image 3: papi
+Draw each character EXACTLY as shown in their reference image.
 """
 
-        prompt = f"""Single manga panel, {style} style.
-{chibikawa_char_desc}
+        if theme == "chibikawa":
+            prompt = f"""{chibikawa_char_desc}
+---
+TASK: Single manga panel in {style} style.
+
+Characters: {chars}
+Dialogue ({lang_name}): {dialogue_str}
+Background: Simple classroom/lab.
+
+{text_note}
+
+⚠️ REMINDER: Character designs MUST match reference images exactly."""
+        else:
+            prompt = f"""Single manga panel, {style} style.
+
 Characters: {chars}
 Dialogue ({lang_name}): {dialogue_str}
 Background: Simple classroom/lab.
