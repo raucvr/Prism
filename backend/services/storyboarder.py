@@ -408,6 +408,27 @@ Dialogue:
 - haku: "The primary endpoint showed a hazard ratio of 0.73 (95% CI: 0.61-0.87)..."
 - calcifer: "Hmph! But what about the selection bias in the control group?"
 ==="""
+        elif self.character_theme == "chibikawa":
+            # 原创角色主题 - 使用参考图片保证角色一致性
+            style_name = "Chibikawa (original cute characters)"
+            characters_desc = """Pip (orange puppy, the wise mentor/professor - has floppy ears and cream-colored face markings),
+Kumomo (soft blue cloud creature with a small leaf sprout on head - the curious student),
+Pippin (brown hedgehog-raccoon with soft spikes and striped tail - the skeptic who asks tough questions, loves snacks)"""
+            example_dialogue = """===
+Panel 1
+Characters: pip, kumomo
+Scene: Pip (orange puppy professor) holding the paper, Kumomo (cloud creature) looking curious, in a research lab
+Dialogue:
+- pip: "This study uses a randomized controlled trial with n=2,847 participants..."
+- kumomo: "What was the stratification criteria?"
+===
+Panel 2
+Characters: pip, kumomo, pippin
+Scene: All three examining a complex diagram on a whiteboard
+Dialogue:
+- pip: "The primary endpoint showed a hazard ratio of 0.73 (95% CI: 0.61-0.87)..."
+- pippin: "But what about the selection bias in the control group?"
+==="""
         else:  # chiikawa (default)
             style_name = "Chiikawa"
             characters_desc = "Hachiware (senior researcher/professor), Chiikawa (curious PhD student), Usagi (the skeptic who asks tough questions)"
@@ -652,6 +673,8 @@ Generate all panels."""
         """根据主题返回默认角色列表"""
         if self.character_theme == "ghibli":
             return ["haku", "chihiro"]
+        elif self.character_theme == "chibikawa":
+            return ["pip", "kumomo"]
         return ["chiikawa", "hachiware"]
 
     def _create_fallback_storyboard(
@@ -690,6 +713,37 @@ Generate all panels."""
                     character_emotions={"haku": "happy", "chihiro": "happy", "calcifer": "excited"},
                     dialogue={"chihiro": "原来如此！", "haku": "做得好！", "calcifer": "哼，我早就知道了！"},
                     background="sunny classroom"
+                )
+            ]
+        elif self.character_theme == "chibikawa":
+            # 原创角色主题
+            panels = [
+                Panel(
+                    panel_number=1,
+                    panel_type=PanelType.TITLE,
+                    visual_description="Pip (orange puppy with floppy ears) holding a book, Kumomo (blue cloud creature with leaf sprout) looking curious",
+                    characters=["pip", "kumomo"],
+                    character_emotions={"pip": "explaining", "kumomo": "curious"},
+                    dialogue={"pip": "今天来学习一个有趣的话题！", "kumomo": "是什么呢？"},
+                    background="simple study room"
+                ),
+                Panel(
+                    panel_number=2,
+                    panel_type=PanelType.EXPLANATION,
+                    visual_description="Pip at whiteboard explaining, Kumomo and Pippin (hedgehog with striped tail) listening",
+                    characters=["pip", "kumomo", "pippin"],
+                    character_emotions={"pip": "explaining", "kumomo": "thinking", "pippin": "skeptical"},
+                    dialogue={"pip": "让我来解释一下～", "pippin": "这个靠谱吗..."},
+                    background="classroom"
+                ),
+                Panel(
+                    panel_number=3,
+                    panel_type=PanelType.CONCLUSION,
+                    visual_description="All three original characters celebrating together - Pip, Kumomo, and Pippin",
+                    characters=["pip", "kumomo", "pippin"],
+                    character_emotions={"pip": "happy", "kumomo": "happy", "pippin": "excited"},
+                    dialogue={"kumomo": "原来如此！", "pip": "做得好！", "pippin": "还不错嘛！"},
+                    background="festive background with sparkles"
                 )
             ]
         else:  # chiikawa (default)
@@ -737,6 +791,23 @@ Generate all panels."""
 class CharacterLibrary:
     """角色库 - 主要用于加载参考图片"""
 
+    # Chibikawa 原创角色映射 - 文件名 -> 角色名
+    CHIBIKAWA_CHARACTERS = {
+        "kumo": "kumomo",      # 云朵生物 - 好奇的学生
+        "kumomo": "kumomo",    # 别名
+        "nezu": "pippin",      # 刺猬小浣熊 - 怀疑论者
+        "pippin": "pippin",    # 别名
+        "papi": "pip",         # 橙色小狗 - 导师教授
+        "pip": "pip",          # 别名
+    }
+
+    # Chibikawa 角色对应的参考图片文件
+    CHIBIKAWA_IMAGES = {
+        "kumomo": "kumo.jpeg",
+        "pippin": "nezu.jpeg",
+        "pip": "papi.jpeg",
+    }
+
     def __init__(self):
         self.image_base_path = Path(__file__).parent.parent.parent / "config" / "character_images"
         self._load_config()
@@ -756,9 +827,23 @@ class CharacterLibrary:
 
     def get_reference_images(self, char_name: str, emotion: str = None) -> List[str]:
         """获取角色参考图片路径"""
+        image_paths = []
+        char_name_lower = char_name.lower()
+
+        # 检查是否是 chibikawa 原创角色
+        normalized_name = self.CHIBIKAWA_CHARACTERS.get(char_name_lower)
+        if normalized_name:
+            # 使用 chibikawa 原创角色的参考图片
+            img_filename = self.CHIBIKAWA_IMAGES.get(normalized_name)
+            if img_filename:
+                full_path = self.image_base_path / img_filename
+                if full_path.exists():
+                    image_paths.append(str(full_path))
+                    return image_paths
+
+        # 回退到 YAML 配置
         char = self.characters.get(char_name, {})
         ref_images = char.get("reference_images", {})
-        image_paths = []
 
         # 主要参考图
         for img_path in ref_images.get("main", []):
@@ -774,6 +859,15 @@ class CharacterLibrary:
                 if full_path.exists():
                     image_paths.append(str(full_path))
 
+        return image_paths
+
+    def get_all_chibikawa_reference_images(self) -> List[str]:
+        """获取所有 chibikawa 原创角色的参考图片"""
+        image_paths = []
+        for char_name, img_filename in self.CHIBIKAWA_IMAGES.items():
+            full_path = self.image_base_path / img_filename
+            if full_path.exists():
+                image_paths.append(str(full_path))
         return image_paths
 
     def get_all_reference_images_for_panel(
@@ -805,7 +899,8 @@ _storyboarder: Optional[Storyboarder] = None
 # Cache version - increment this to invalidate all cached storyboards
 # v2: Added translation context fix for zh-CN
 # v3: Removed 25-char truncation limit for CJK
-CACHE_VERSION = 3
+# v4: Added chibikawa theme with original characters (Pip, Kumomo, Pippin)
+CACHE_VERSION = 4
 
 # Simple storyboard cache (text hash -> storyboard)
 _storyboard_cache: Dict[str, Storyboard] = {}

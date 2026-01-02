@@ -291,8 +291,12 @@ class MangaGenerator:
             negative_prompt=negative_prompt
         )
 
-        # 加载参考图片（可选，Gemini 已有内置知识）
-        reference_images = self._load_reference_images(panel)
+        # 加载参考图片
+        # chibikawa 主题必须加载所有原创角色的参考图片以保持一致性
+        if theme == "chibikawa":
+            reference_images = self._load_all_chibikawa_references()
+        else:
+            reference_images = self._load_reference_images(panel)
         if reference_images:
             print(f"[MangaGenerator] Using {len(reference_images)} reference images")
 
@@ -364,8 +368,12 @@ class MangaGenerator:
 
         # 加载参考图片
         reference_images = []
-        for panel in panels[:1]:  # 只用第一个panel的参考图
-            reference_images.extend(self._load_reference_images(panel))
+        # chibikawa 主题必须加载所有原创角色的参考图片以保持一致性
+        if theme == "chibikawa":
+            reference_images = self._load_all_chibikawa_references()
+        else:
+            for panel in panels[:1]:  # 只用第一个panel的参考图
+                reference_images.extend(self._load_reference_images(panel))
         if reference_images:
             print(f"[MangaGenerator] Using {len(reference_images)} reference images")
 
@@ -496,6 +504,8 @@ class MangaGenerator:
         # 简洁的风格描述
         if theme == "ghibli":
             style = "Ghibli (Spirited Away style, Haku in HUMAN form only)"
+        elif theme == "chibikawa":
+            style = "Chibikawa (ORIGINAL cute characters - draw EXACTLY as shown in reference images)"
         else:
             style = "Chiikawa (Nagano style)"
 
@@ -511,10 +521,20 @@ class MangaGenerator:
             else:
                 text_note = f"Text: Clear speech bubbles in {lang_name}. Render text LEGIBLY."
 
+        # Chibikawa 原创角色描述
+        chibikawa_char_desc = ""
+        if theme == "chibikawa":
+            chibikawa_char_desc = """
+CRITICAL: These are ORIGINAL characters. Draw them EXACTLY as shown in the reference images:
+- Pip: Orange puppy with floppy ears, cream-colored face markings, round body (the professor/mentor)
+- Kumomo: Soft blue cloud creature with small green leaf sprout on head (the curious student)
+- Pippin: Brown hedgehog-raccoon with soft spikes, striped tail, loves snacks (the skeptic)
+"""
+
         # 根据布局生成不同的 prompt
         if num_panels == 1:
             prompt = f"""{layout_desc}, {style}.
-
+{chibikawa_char_desc}
 Audience: Nobel Prize scholars who LOVE {style.split()[0]} characters.
 Balance: Academic rigor + cute charm.
 
@@ -524,7 +544,7 @@ Background: Simple classroom/lab.
 {text_note}"""
         else:
             prompt = f"""{layout_desc}, {style}.
-
+{chibikawa_char_desc}
 Audience: Nobel Prize scholars who LOVE {style.split()[0]} characters.
 Balance: Academic rigor + cute charm.
 
@@ -598,7 +618,12 @@ Generate {layout_desc} with black borders between panels."""
         dialogue_str = " | ".join(dialogues) if dialogues else "(no dialogue)"
 
         chars = ", ".join(panel.characters) if panel.characters else ""
-        style = "Ghibli (Haku in HUMAN form)" if theme == "ghibli" else "Chiikawa"
+        if theme == "ghibli":
+            style = "Ghibli (Haku in HUMAN form)"
+        elif theme == "chibikawa":
+            style = "Chibikawa (ORIGINAL characters - match reference images EXACTLY)"
+        else:
+            style = "Chiikawa"
 
         # CJK 语言强调文字清晰
         if is_cjk:
@@ -606,8 +631,18 @@ Generate {layout_desc} with black borders between panels."""
         else:
             text_note = "Render text CLEARLY in speech bubbles."
 
-        prompt = f"""Single manga panel, {style} style.
+        # Chibikawa 原创角色描述
+        chibikawa_char_desc = ""
+        if theme == "chibikawa":
+            chibikawa_char_desc = """
+CRITICAL: Draw ORIGINAL characters EXACTLY as shown in reference images:
+- Pip: Orange puppy, floppy ears, cream face (mentor)
+- Kumomo: Blue cloud creature, leaf sprout on head (student)
+- Pippin: Brown hedgehog-raccoon, striped tail (skeptic)
+"""
 
+        prompt = f"""Single manga panel, {style} style.
+{chibikawa_char_desc}
 Characters: {chars}
 Dialogue ({lang_name}): {dialogue_str}
 Background: Simple classroom/lab.
@@ -641,6 +676,36 @@ Background: Simple classroom/lab.
                 ))
             except Exception as e:
                 print(f"[MangaGenerator] Failed to load ref image: {e}")
+
+        return reference_images
+
+    def _load_all_chibikawa_references(self) -> List[ImageContent]:
+        """
+        加载所有 chibikawa 原创角色的参考图片
+        这是确保角色一致性的关键 - 每次图像生成都必须包含这些参考图
+        """
+        reference_images = []
+
+        image_paths = self.char_lib.get_all_chibikawa_reference_images()
+        print(f"[MangaGenerator] Loading {len(image_paths)} chibikawa reference images")
+
+        for img_path in image_paths:
+            try:
+                with open(img_path, "rb") as f:
+                    img_data = base64.b64encode(f.read()).decode()
+
+                ext = Path(img_path).suffix.lower()
+                mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+                mime_type = mime_map.get(ext, "image/png")
+
+                reference_images.append(ImageContent(
+                    data=img_data,
+                    mime_type=mime_type,
+                    is_base64=True
+                ))
+                print(f"[MangaGenerator] Loaded reference: {Path(img_path).name}")
+            except Exception as e:
+                print(f"[MangaGenerator] Failed to load chibikawa ref image {img_path}: {e}")
 
         return reference_images
 
