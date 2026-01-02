@@ -1,0 +1,31 @@
+# Prism - API Configuration
+# Copy this file to api_config.yaml and fill in your API key
+
+core_engine:
+  default_model: "google/gemini-3-pro-image-preview"
+  image_model: "google/gemini-3-pro-image-preview"
+
+# API Providers
+providers:
+  openrouter:
+    enabled: true
+    api_key: "${OPENROUTER_API_KEY}"  # Set via environment variable or replace with your key
+    base_url: "https://openrouter.ai/api/v1"
+    models:
+      - "google/gemini-3-pro-image-preview"
+
+# Manga generation settings
+manga_settings:
+  default_style: "full_color_manga"
+  aspect_ratio: "2:3"
+  render_text_in_image: true
+  panels_per_page: 1
+  default_theme: "chibikawa"
+  negative_prompt: "photorealistic, 3d render, anime style, Disney style, complex shading, multiple panels, comic strip layout, blurry, messy lines"
+
+# Output settings
+output:
+  image_format: "png"
+  image_quality: 95
+  max_width: 1024
+  max_height: 1536

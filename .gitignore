@@ -48,6 +48,9 @@ desktop.ini
 .env.local
 .env.*.local
 
+# API config with secrets (use api_config.yaml.example as template)
+config/api_config.yaml
+
 # Output files
 output/
 
