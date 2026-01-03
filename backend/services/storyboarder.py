@@ -157,8 +157,14 @@ class Storyboarder:
         import hashlib
         global _storyboard_cache
 
-        # Check cache first (include CACHE_VERSION to invalidate old entries)
-        cache_key = hashlib.md5(f"v{CACHE_VERSION}:{text[:5000]}:{title}:{language}:{self.character_theme}".encode()).hexdigest()
+        # Use FULL text hash to avoid cache collision between papers with similar beginnings
+        # Previously used text[:5000] which caused wrong storyboards to be returned
+        full_text_hash = hashlib.sha256(text.encode()).hexdigest()
+        cache_key = hashlib.md5(f"v{CACHE_VERSION}:{full_text_hash}:{title}:{language}:{self.character_theme}".encode()).hexdigest()
+
+        print(f"[Storyboarder] Input text length: {len(text)} chars, hash: {full_text_hash[:16]}...")
+        print(f"[Storyboarder] Text preview: {text[:200]}...")
+
         if cache_key in _storyboard_cache:
             cached = _storyboard_cache[cache_key]
             print(f"[Storyboarder] Using cached storyboard ({len(cached.panels)} panels)")
@@ -321,9 +327,16 @@ Output: panel_number|character|translated_dialogue
         """
         构建技术解读 prompt - 生成详细的英文技术分析
         """
+        # Log the actual content being sent to AI
+        print(f"[Storyboarder] Building analysis prompt with {len(text)} chars of paper content")
+        print(f"[Storyboarder] Paper title: {title}")
+        print(f"[Storyboarder] First 500 chars of paper: {text[:500]}...")
+
         return f"""You are a senior academic reviewer. Analyze this paper and produce a COMPREHENSIVE technical breakdown in English.
 
-# Paper Content
+⚠️ CRITICAL: You MUST analyze ONLY the content provided below. Do NOT invent, assume, or hallucinate any information not present in the paper text.
+
+# Paper Content (This is the ONLY source of truth - analyze ONLY what you see here)
 {text[:80000]}
 
 # Required Analysis Structure
@@ -379,6 +392,13 @@ Output: panel_number|character|translated_dialogue
 - Do NOT simplify equations
 - Include EXACT software/tool names as written
 - This analysis will be used to create an academic manga - any error will be immediately noticed by expert readers
+
+⚠️ ANTI-HALLUCINATION RULES:
+- If information is NOT in the paper, write "Not mentioned in paper" - do NOT invent details
+- If you cannot find specific numbers, write "Specific value not provided" - do NOT make up numbers
+- If methodology details are unclear, write "Details not specified" - do NOT assume
+- NEVER fabricate authors, affiliations, or citations not in the provided text
+- Your analysis MUST be traceable back to specific text in the paper above
 
 Output the complete technical analysis in English."""
 
@@ -450,15 +470,17 @@ Dialogue:
 
         return f"""Create a {style_name}-style manga explaining this paper.
 
-# Technical Analysis
+# Technical Analysis (This is your ONLY source of truth)
 {text[:100000]}
 
 # Key Points
 - Readers: Nobel Prize-level scholars who LOVE {style_name} style
 - Balance: Academic rigor + {style_name} charm
-- ONLY use facts from the analysis above - NO hallucination
+- ⚠️ CRITICAL: ONLY use facts from the Technical Analysis above - NO hallucination
+- ⚠️ If the analysis says "Not mentioned" or "Not specified", do NOT invent that information
 - Copy exact numbers, formulas, method names (e.g., "Amber ff14SB" not "CHARMM36m")
 - Keep each dialogue SHORT and punchy (1-2 sentences max)
+- Every fact in your manga MUST come from the Technical Analysis above
 
 # Characters
 {characters_desc}
@@ -903,7 +925,8 @@ _storyboarder: Optional[Storyboarder] = None
 # v2: Added translation context fix for zh-CN
 # v3: Removed 25-char truncation limit for CJK
 # v4: Added chibikawa theme with original characters (Pip, Kumomo, Pippin)
-CACHE_VERSION = 4
+# v5: Fixed cache key collision - now uses full text hash instead of first 5000 chars
+CACHE_VERSION = 5
 
 # Simple storyboard cache (text hash -> storyboard)
 _storyboard_cache: Dict[str, Storyboard] = {}
