@@ -155,32 +155,17 @@ class Storyboarder:
         Step 3: 翻译对白到目标语言（如果不是英文）
         """
         import hashlib
-        global _storyboard_cache
 
-        # Use FULL text hash to avoid cache collision between papers with similar beginnings
-        # Previously used text[:5000] which caused wrong storyboards to be returned
-        full_text_hash = hashlib.sha256(text.encode()).hexdigest()
-        cache_key = hashlib.md5(f"v{CACHE_VERSION}:{full_text_hash}:{title}:{language}:{self.character_theme}".encode()).hexdigest()
+        # 验证输入
+        if not text or len(text) < 100:
+            raise ValueError(f"Input text too short ({len(text)} chars). PDF may not have been parsed correctly.")
 
-        print(f"[Storyboarder] ========== NEW GENERATION REQUEST ==========")
-        print(f"[Storyboarder] Cache version: {CACHE_VERSION}")
-        print(f"[Storyboarder] Input text length: {len(text)} chars")
-        print(f"[Storyboarder] Full text hash: {full_text_hash}")
-        print(f"[Storyboarder] Cache key: {cache_key}")
-        print(f"[Storyboarder] Title: {title}")
-        print(f"[Storyboarder] Language: {language}, Theme: {self.character_theme}")
-        print(f"[Storyboarder] Text preview (first 500 chars):")
-        print(f"[Storyboarder] >>> {text[:500]} <<<")
-        print(f"[Storyboarder] Current cache size: {len(_storyboard_cache)} entries")
-        print(f"[Storyboarder] Cached keys: {list(_storyboard_cache.keys())[:3]}...")
+        text_hash = hashlib.sha256(text.encode()).hexdigest()[:16]
+        print(f"[Storyboarder] Input: {len(text)} chars, hash={text_hash}, title={title}")
+        print(f"[Storyboarder] Preview: {text[:200]}...")
 
-        if cache_key in _storyboard_cache:
-            cached = _storyboard_cache[cache_key]
-            print(f"[Storyboarder] ⚠️ CACHE HIT - Using cached storyboard ({len(cached.panels)} panels)")
-            print(f"[Storyboarder] ⚠️ If content is wrong, restart backend to clear cache!")
-            return cached
-
-        print(f"[Storyboarder] ✓ Cache miss - generating fresh storyboard")
+        # 暂时禁用缓存，确保每次都重新生成
+        # TODO: 调试完成后可以重新启用缓存
 
         client = await get_client()
 
@@ -200,9 +185,7 @@ class Storyboarder:
         )
 
         technical_analysis = analysis_response.content
-        print(f"[Storyboarder] Technical analysis generated ({len(technical_analysis)} chars)")
-        print(f"[Storyboarder] Analysis preview (first 500 chars):")
-        print(f"[Storyboarder] >>> {technical_analysis[:500]} <<<")
+        print(f"[Storyboarder] Analysis: {len(technical_analysis)} chars")
 
         # ========== Step 2: 用英文生成高质量漫画分镜 ==========
         print(f"[Storyboarder] Step 2: Generating manga storyboard (in English for quality)...")
@@ -223,10 +206,7 @@ class Storyboarder:
         # 解析响应（暂时设为英文）
         storyboard = self._parse_response(response.content, title, text, "en-US")
 
-        print(f"[Storyboarder] Generated {len(storyboard.panels)} panels in English")
-        # Log first 3 panels for verification
-        for i, panel in enumerate(storyboard.panels[:3]):
-            print(f"[Storyboarder] Panel {panel.panel_number} dialogue: {panel.dialogue}")
+        print(f"[Storyboarder] Generated {len(storyboard.panels)} panels")
 
         # ========== Step 3: 翻译对白到目标语言 ==========
         if language != "en-US":
@@ -342,82 +322,20 @@ Output: panel_number|character|translated_dialogue
 
     def _build_analysis_prompt(self, text: str, title: str) -> str:
         """
-        构建技术解读 prompt - 生成详细的英文技术分析
+        构建技术解读 prompt - 简洁版，让模型自由发挥
         """
-        # Log the actual content being sent to AI
-        print(f"[Storyboarder] Building analysis prompt with {len(text)} chars of paper content")
-        print(f"[Storyboarder] Paper title: {title}")
-        print(f"[Storyboarder] First 500 chars of paper: {text[:500]}...")
+        print(f"[Storyboarder] Analysis prompt: {len(text)} chars")
 
-        return f"""You are a senior academic reviewer. Analyze this paper and produce a COMPREHENSIVE technical breakdown in English.
+        return f"""Analyze this academic paper. Extract ALL key information:
+- Research question and novelty
+- Methodology (exact steps, algorithms, parameters)
+- Results (exact numbers, statistics, comparisons)
+- Conclusions and limitations
 
-⚠️ CRITICAL: You MUST analyze ONLY the content provided below. Do NOT invent, assume, or hallucinate any information not present in the paper text.
+Copy exact values from the paper. Output in English.
 
-# Paper Content (This is the ONLY source of truth - analyze ONLY what you see here)
-{text[:80000]}
-
-# Required Analysis Structure
-
-## 1. Core Innovation & Research Question
-- What is the main problem being addressed?
-- What is novel about this approach?
-- How does it differ from existing methods?
-
-## 2. Methodology Deep Dive
-- Detailed step-by-step technical workflow
-- Key algorithms, equations, and formulas (COPY EXACTLY as written in paper)
-- Data sources, sample sizes, and experimental setup
-- Parameter choices and their justifications
-
-## 3. Quantitative Results
-- ALL numerical results with EXACT values (e.g., "r = 0.82", not "high correlation")
-- Statistical metrics (p-values, confidence intervals, effect sizes, correlation coefficients)
-- Comparison with baselines/prior work
-- Performance across different conditions/datasets
-
-## 4. Technical Implementation Details
-- Software/hardware used (EXACT names: "Amber ff14SB", "TIP3P", etc.)
-- Force fields, water models, simulation parameters
-- Hyperparameters and their EXACT values
-- Training procedures (if applicable)
-- Computational requirements
-
-## 5. Mathematical Formulas
-- Write out ALL key equations EXACTLY as they appear in the paper
-- Include variable definitions
-- Do NOT paraphrase or simplify formulas
-
-## 6. Key Insights & Interpretations
-- What do the results mean mechanistically?
-- Surprising or counterintuitive findings
-- Key design decisions explained (e.g., "LDE excludes ligand information because...")
-
-## 7. Limitations & Future Directions
-- Acknowledged limitations
-- Assumptions made
-- Open questions for future research
-
-## 8. Critical Evaluation
-- Strengths of the methodology
-- Potential weaknesses or concerns
-- Alternative approaches that could be considered
-
-⚠️ CRITICAL INSTRUCTIONS:
-- COPY all numbers, equations, and technical terms EXACTLY from the paper
-- Do NOT substitute terms (e.g., if paper says "MDS", don't say "UMAP")
-- Do NOT round or approximate values
-- Do NOT simplify equations
-- Include EXACT software/tool names as written
-- This analysis will be used to create an academic manga - any error will be immediately noticed by expert readers
-
-⚠️ ANTI-HALLUCINATION RULES:
-- If information is NOT in the paper, write "Not mentioned in paper" - do NOT invent details
-- If you cannot find specific numbers, write "Specific value not provided" - do NOT make up numbers
-- If methodology details are unclear, write "Details not specified" - do NOT assume
-- NEVER fabricate authors, affiliations, or citations not in the provided text
-- Your analysis MUST be traceable back to specific text in the paper above
-
-Output the complete technical analysis in English."""
+# Paper
+{text[:80000]}"""
 
     def _build_storyboard_prompt(self, text: str, title: str, language: str) -> str:
         """
@@ -485,32 +403,17 @@ Dialogue:
 - usagi: "But what about the selection bias in the control group?"
 ==="""
 
-        return f"""Create a {style_name}-style manga explaining this paper.
+        return f"""Create a {style_name}-style manga (40-100 panels) explaining this paper.
 
-# Technical Analysis (This is your ONLY source of truth)
+Characters: {characters_desc}
+
+Use this analysis as source:
 {text[:100000]}
 
-# Key Points
-- Readers: Nobel Prize-level scholars who LOVE {style_name} style
-- Balance: Academic rigor + {style_name} charm
-- ⚠️ CRITICAL: ONLY use facts from the Technical Analysis above - NO hallucination
-- ⚠️ If the analysis says "Not mentioned" or "Not specified", do NOT invent that information
-- Copy exact numbers, formulas, method names (e.g., "Amber ff14SB" not "CHARMM36m")
-- Dialogue can be as LONG as needed to explain concepts fully - NEVER truncate or cut off mid-sentence
-- If a concept requires detailed explanation, use the full dialogue without shortening
-- Every fact in your manga MUST come from the Technical Analysis above
-
-# Characters
-{characters_desc}
-
-# Format
-- 40-100 panels, dialogue in English
-- Background: simple classroom/lab (keep consistent!)
-- Use === to separate panels:
-
+Format (use === to separate):
 {example_dialogue}
 
-Generate all panels."""
+Generate all panels with full dialogues. Use exact numbers from the analysis."""
 
     def _fix_json(self, json_str: str) -> str:
         """尝试修复常见的 JSON 格式错误"""
