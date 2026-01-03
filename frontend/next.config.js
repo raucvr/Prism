@@ -16,12 +16,13 @@ const nextConfig = {
   experimental: {
     proxyTimeout: 6000000, // 100 minutes for long manga generation
   },
-  // API 代理到后端
+  // API 代理到后端 (支持动态端口)
   async rewrites() {
+    const backendUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
     return [
       {
         source: "/api/:path*",
-        destination: "http://localhost:8000/api/:path*",
+        destination: `${backendUrl}/api/:path*`,
       },
     ];
   },

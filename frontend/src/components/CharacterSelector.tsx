@@ -16,12 +16,12 @@ interface ThemeOption {
 
 const themes: ThemeOption[] = [
   {
-    id: "chibikawa",
-    name: "Chibikawa",
+    id: "kumomo",
+    name: "Kumomo",
     emoji: "☁️",
     color: "bg-sky-100 border-sky-300 hover:bg-sky-200",
     description: "Original cute characters by Prism",
-    style: "Chibikawa style, original cute creatures (papi, kumo, nezu), pastel colors, soft lines",
+    style: "Kumomo style, original cute creatures (papi, kumo, nezu), pastel colors, soft lines",
   },
   {
     id: "chiikawa",

@@ -21,7 +21,7 @@ from PIL import Image, ImageDraw, ImageFont
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from engines import get_client, ImageGenerationConfig, ImageContent
+from engines import get_client, ImageGenerationConfig, ImageContent, GenerationConfig
 from config_loader import get_config
 from services.storyboarder import Storyboard, Panel, PanelType, CharacterLibrary
 from services.progress import set_stage, set_panel_progress, reset_progress
@@ -150,6 +150,12 @@ class MangaGenerator:
         self.output_dir.mkdir(exist_ok=True)
         self.char_lib = CharacterLibrary()
         self.panels_per_batch = 4  # 每次生成4个panel
+        # Kumomo 角色名映射 - 用于规范化角色名
+        self.kumomo_char_map = {
+            "kumo": "kumo", "cloud": "kumo", "云朵": "kumo",
+            "nezu": "nezu", "hedgehog": "nezu", "刺猬": "nezu",
+            "papi": "papi", "dog": "papi", "小狗": "papi", "puppy": "papi"
+        }
 
     async def generate_from_storyboard(
         self,
@@ -258,96 +264,17 @@ class MangaGenerator:
             language=storyboard.language
         )
 
-    async def _generate_panel(self, panel: Panel, language: str, max_retries: int = 3) -> GeneratedPanel:
+    async def _generate_panel_batch(self, panels: List[Panel], language: str, max_retries: int = 5) -> GeneratedPanel:
         """
-        生成单个漫画格
+        批量生成多个漫画格（带验证和强化纠错）
 
-        使用简化的 prompt，让 Gemini 使用内置知识
-        包含重试逻辑以处理网络错误
-        """
-        client = await get_client()
-        output_settings = self.config.output_settings
-
-        # 获取当前主题
-        theme = getattr(self, 'current_theme', 'chiikawa')
-
-        # 简化的 prompt - 利用 Gemini 内置知识
-        prompt = self._build_simple_prompt(panel, language, theme)
-
-        width, height = self._get_panel_dimensions(
-            panel.layout_hint,
-            output_settings.max_width,
-            output_settings.max_height
-        )
-
-        negative_prompt = getattr(self.config.manga_settings, 'negative_prompt', None)
-        if not negative_prompt:
-            negative_prompt = "photorealistic, 3d render, anime style, complex shading, multiple panels"
-        # 添加角色一致性相关的负面提示
-        negative_prompt += ", inconsistent characters, characters not matching reference images, different colors from reference, wrong character proportions"
-
-        config = ImageGenerationConfig(
-            width=width,
-            height=height,
-            style=self.config.manga_settings.default_style,
-            negative_prompt=negative_prompt,
-            temperature=0.3  # 低温度确保角色一致性
-        )
-
-        # 加载参考图片
-        # chibikawa 主题必须加载所有原创角色的参考图片以保持一致性
-        if theme == "chibikawa":
-            reference_images = self._load_all_chibikawa_references()
-        else:
-            reference_images = self._load_reference_images(panel)
-        if reference_images:
-            print(f"[MangaGenerator] Using {len(reference_images)} reference images")
-
-        # 带重试的生成逻辑
-        last_error = None
-        for attempt in range(max_retries):
-            try:
-                response = await client.generate_image(prompt, config, reference_images=reference_images)
-
-                if response.images:
-                    image = response.images[0]
-                    print(f"[MangaGenerator] Panel {panel.panel_number} generated")
-                    return GeneratedPanel(
-                        panel_number=panel.panel_number,
-                        image_base64=image.data,
-                        mime_type=image.mime_type,
-                        dialogue=panel.dialogue,
-                        characters=panel.characters,
-                        width=width,
-                        height=height
-                    )
-
-            except Exception as e:
-                last_error = e
-                retry_msg = f" (attempt {attempt + 1}/{max_retries})" if attempt < max_retries - 1 else ""
-                print(f"[MangaGenerator] Generation failed{retry_msg}: {e}")
-
-                # 如果还有重试机会，等待后重试
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt  # 指数退避: 1s, 2s, 4s
-                    print(f"[MangaGenerator] Retrying in {wait_time}s...")
-                    await asyncio.sleep(wait_time)
-
-        # 所有重试都失败了
-        print(f"[MangaGenerator] All {max_retries} attempts failed for panel {panel.panel_number}")
-        return self._create_placeholder_panel(panel, width, height)
-
-    async def _generate_panel_batch(self, panels: List[Panel], language: str, max_retries: int = 3) -> GeneratedPanel:
-        """
-        批量生成多个漫画格
-
-        根据面板数量使用不同布局：
-        - 1 panel: 单张图 1024x1024
-        - 2 panels: 横向排列 2048x1024
-        - 3-4 panels: 2x2网格 2048x2048
+        流程：
+        1. 生成图像
+        2. 验证角色/剧情是否符合剧本（kumomo 主题必须验证）
+        3. 如果不通过，带详细反馈重新生成
+        4. 最多尝试 max_retries 次，每次都验证
         """
         client = await get_client()
-        output_settings = self.config.output_settings
 
         # 获取当前主题
         theme = getattr(self, 'current_theme', 'chiikawa')
@@ -355,113 +282,157 @@ class MangaGenerator:
         # 根据面板数量确定尺寸
         width, height = self._get_batch_dimensions(len(panels))
 
-        # 构建批量 prompt
-        prompt = self._build_batch_prompt(panels, language, theme)
+        # 收集此批次所有出现的角色 (用于动态加载参考图)
+        batch_characters = set()
+        if theme == "kumomo":
+            for p in panels:
+                for c in p.characters:
+                    norm_c = c.lower().strip()
+                    # 尝试映射到标准名称 kumo/nezu/papi
+                    for key, val in self.kumomo_char_map.items():
+                        if key in norm_c:
+                            batch_characters.add(val)
+                            break
+            print(f"[MangaGenerator] Active characters in batch: {batch_characters}")
+
+        # 构建基础 prompt (传入 batch_characters)
+        base_prompt = self._build_batch_prompt(panels, language, theme, batch_characters)
 
         negative_prompt = getattr(self.config.manga_settings, 'negative_prompt', None)
         if not negative_prompt:
             negative_prompt = "photorealistic, 3d render, anime style, complex shading, blurry, messy lines"
-        # 添加角色一致性相关的负面提示
-        negative_prompt += ", inconsistent characters, characters not matching reference images, changing character designs between panels, different colors from reference, wrong character proportions"
+        # 强化负面提示 - 明确禁止 Chiikawa 角色特征
+        negative_prompt += ", cat ears, rabbit ears, chiikawa, hachiware, usagi, inconsistent characters"
 
         config = ImageGenerationConfig(
             width=width,
             height=height,
             style=self.config.manga_settings.default_style,
             negative_prompt=negative_prompt,
-            temperature=0.3  # 低温度确保角色一致性
+            temperature=0.3
         )
 
-        # 加载参考图片
+        # 加载参考图片 (动态: 只加载批次需要的角色)
         reference_images = []
-        # chibikawa 主题必须加载所有原创角色的参考图片以保持一致性
-        if theme == "chibikawa":
-            reference_images = self._load_all_chibikawa_references()
+        if theme == "kumomo":
+            chars_to_load = list(batch_characters) if batch_characters else ["kumo", "nezu", "papi"]
+            reference_images = self._load_specific_kumomo_references(chars_to_load)
         else:
-            for panel in panels[:1]:  # 只用第一个panel的参考图
+            for panel in panels[:1]:
                 reference_images.extend(self._load_reference_images(panel))
         if reference_images:
             print(f"[MangaGenerator] Using {len(reference_images)} reference images")
 
-        # 带重试的生成逻辑
-        last_error = None
+        # 生成 + 验证循环（强化纠错）
+        validation_feedback = ""
+        last_valid_image = None  # 保存最后一次通过验证或生成的图像
+
         for attempt in range(max_retries):
             try:
+                # 构建 prompt（如果有验证反馈则加入更强的纠错指令）
+                if validation_feedback:
+                    prompt = f"""RETRY: {validation_feedback}
+{base_prompt}"""
+                    print(f"[MangaGenerator] Attempt {attempt+1}/{max_retries}: Regenerating with feedback: {validation_feedback}")
+                else:
+                    prompt = base_prompt
+                    print(f"[MangaGenerator] Attempt {attempt+1}/{max_retries}: Generating...")
+
+                # 生成图像
                 response = await client.generate_image(prompt, config, reference_images=reference_images)
 
                 if response.images:
                     image = response.images[0]
                     print(f"[MangaGenerator] Batch generated ({len(panels)} panels)")
-                    return GeneratedPanel(
-                        panel_number=panels[0].panel_number,
-                        image_base64=image.data,
-                        mime_type=image.mime_type,
-                        dialogue={},  # 批量模式不单独存储对白
-                        characters=[],
-                        width=width,
-                        height=height
-                    )
+
+                    # kumomo 主题: 每次都验证，确保角色正确
+                    if theme == "kumomo":
+                        generated_img = ImageContent(
+                            data=image.data,
+                            mime_type=image.mime_type,
+                            is_base64=True
+                        )
+                        is_valid, feedback = await self._validate_generated_image(
+                            generated_img, panels, reference_images, theme
+                        )
+
+                        if is_valid:
+                            print(f"[MangaGenerator] ✓ Validation PASSED on attempt {attempt+1}")
+                            return GeneratedPanel(
+                                panel_number=panels[0].panel_number,
+                                image_base64=image.data,
+                                mime_type=image.mime_type,
+                                dialogue={},
+                                characters=[],
+                                width=width,
+                                height=height
+                            )
+                        else:
+                            print(f"[MangaGenerator] ✗ Validation FAILED on attempt {attempt+1}: {feedback}")
+                            validation_feedback = feedback
+                            last_valid_image = image  # 保存这次生成的图像以防万一
+
+                            # 如果是最后一次尝试，返回最后生成的图像（虽然未通过验证）
+                            if attempt == max_retries - 1:
+                                print(f"[MangaGenerator] ⚠ All {max_retries} attempts failed validation, returning last generated image")
+                                return GeneratedPanel(
+                                    panel_number=panels[0].panel_number,
+                                    image_base64=image.data,
+                                    mime_type=image.mime_type,
+                                    dialogue={},
+                                    characters=[],
+                                    width=width,
+                                    height=height
+                                )
+                            continue  # 重新生成
+                    else:
+                        # 非 kumomo 主题直接返回
+                        return GeneratedPanel(
+                            panel_number=panels[0].panel_number,
+                            image_base64=image.data,
+                            mime_type=image.mime_type,
+                            dialogue={},
+                            characters=[],
+                            width=width,
+                            height=height
+                        )
 
             except Exception as e:
-                last_error = e
-                retry_msg = f" (attempt {attempt + 1}/{max_retries})" if attempt < max_retries - 1 else ""
-                print(f"[MangaGenerator] Batch generation failed{retry_msg}: {e}")
+                print(f"[MangaGenerator] Attempt {attempt+1}/{max_retries} failed with error: {e}")
 
                 if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    print(f"[MangaGenerator] Retrying in {wait_time}s...")
+                    wait_time = min(2 ** attempt, 8)  # 最多等待 8 秒
+                    print(f"[MangaGenerator] Waiting {wait_time}s before retry...")
                     await asyncio.sleep(wait_time)
 
+        # 所有尝试都失败了
         print(f"[MangaGenerator] All {max_retries} attempts failed for batch")
+
+        # 如果有之前生成的图像（未通过验证），仍然返回它
+        if last_valid_image:
+            print(f"[MangaGenerator] Returning last generated image despite validation failure")
+            return GeneratedPanel(
+                panel_number=panels[0].panel_number,
+                image_base64=last_valid_image.data,
+                mime_type=last_valid_image.mime_type,
+                dialogue={},
+                characters=[],
+                width=width,
+                height=height
+            )
+
         return self._create_placeholder_batch(panels, width, height)
 
     def _calculate_optimal_batch_size(self, panels: List[Panel], is_cjk: bool) -> int:
         """
-        根据面板文本长度动态计算最佳批次大小
+        固定返回 4 个面板的批次大小
 
-        长对话时减少每批面板数量，以保证文字清晰可读
+        对话长度在分镜生成阶段控制（prompt限制单句50字符以内）
         """
         if not panels:
             return 1
 
-        # 计算所有面板中最长的单个对白和总对白长度
-        max_single_dialogue = 0
-        total_dialogue_len = 0
-
-        for panel in panels:
-            if panel.dialogue:
-                for char, text in panel.dialogue.items():
-                    max_single_dialogue = max(max_single_dialogue, len(text))
-                    total_dialogue_len += len(text)
-
-        print(f"[MangaGenerator] Dialogue analysis: max_single={max_single_dialogue}, total={total_dialogue_len}, is_cjk={is_cjk}")
-
-        # CJK 语言的阈值（更严格，确保文字清晰）
-        if is_cjk:
-            # 如果单个对白超过 150 字，只生成 1 个面板
-            if max_single_dialogue > 150:
-                print(f"[MangaGenerator] Long CJK dialogue ({max_single_dialogue} chars), using 1 panel")
-                return 1
-            # 如果单个对白超过 80 字，只生成 2 个面板
-            elif max_single_dialogue > 80:
-                print(f"[MangaGenerator] Medium CJK dialogue ({max_single_dialogue} chars), using 2 panels")
-                return min(2, len(panels))
-            # 否则生成 4 个面板
-            else:
-                return min(4, len(panels))
-        else:
-            # 英文：也根据对话长度调整
-            # 如果单个对白超过 300 字符，只生成 1 个面板
-            if max_single_dialogue > 300:
-                print(f"[MangaGenerator] Long English dialogue ({max_single_dialogue} chars), using 1 panel")
-                return 1
-            # 如果单个对白超过 150 字符，只生成 2 个面板
-            elif max_single_dialogue > 150:
-                print(f"[MangaGenerator] Medium English dialogue ({max_single_dialogue} chars), using 2 panels")
-                return min(2, len(panels))
-            # 否则生成 4 个面板
-            else:
-                return min(4, len(panels))
+        return min(4, len(panels))
 
     def _get_batch_dimensions(self, batch_size: int) -> tuple:
         """
@@ -478,14 +449,107 @@ class MangaGenerator:
         else:
             return (2048, 2048)
 
-    def _build_batch_prompt(self, panels: List[Panel], language: str, theme: str = "chiikawa") -> str:
+    async def _validate_generated_image(
+        self,
+        generated_image: ImageContent,
+        panels: List[Panel],
+        reference_images: List[ImageContent],
+        theme: str
+    ) -> tuple[bool, str]:
         """
-        构建批量图像生成 prompt
+        验证生成的漫画是否符合要求（思维链 CoT 版）
+
+        核心策略：先让模型描述看到的内容，再判断是否匹配
+        这样可以避免模型直接说"PASS"而没有真正检查
+
+        Returns:
+            (is_valid, feedback) - 是否通过验证，以及反馈信息
+        """
+        # 只对 kumomo 主题进行验证（原创角色需要严格一致）
+        if theme != "kumomo":
+            return True, ""
+
+        client = await get_client()
+
+        # 构建 Panel 摘要
+        panel_summaries = []
+        for i, panel in enumerate(panels):
+            chars = ", ".join(panel.characters) if panel.characters else "none"
+            panel_summaries.append(f"Panel {i+1}: Characters expected = [{chars}]")
+        script_context = "\n".join(panel_summaries)
+
+        # 严格验证 - 先描述再判断
+        validate_prompt = f"""CHARACTER DESIGNS (reference):
+- Image 1 = kumo
+- Image 2 = nezu
+- Image 3 = papi
+
+GENERATED MANGA = Image 4 (last image)
+
+STEP 1: List each character you see in the manga. Describe their shape briefly.
+STEP 2: For each character, does it look like the reference design?
+
+STRICT RULE: If ANY character does NOT match its reference design, answer FAIL.
+
+Answer format:
+PASS (all characters match)
+or
+FAIL: [which character is wrong and why]"""
+
+        # 发送参考图 + 生成的漫画图进行验证
+        all_images = reference_images + [generated_image]
+
+        config = GenerationConfig(
+            temperature=0.0,  # 最低温度 - 确定性输出
+            top_p=0.1,        # 极低采样 - 只选最可能的结果
+            top_k=1,          # 只选概率最高的token
+            max_tokens=500
+        )
+
+        try:
+            response = await client.generate_text(
+                prompt=validate_prompt,
+                images=all_images,
+                config=config
+            )
+
+            result = response.content.strip()
+            print(f"[MangaGenerator] Validation: {result[:200]}")
+
+            result_upper = result.upper()
+
+            # 严格模式：只有明确说 PASS 且没有 FAIL 才通过
+            if "PASS" in result_upper and "FAIL" not in result_upper:
+                # 额外检查：如果提到了错误的角色类型，仍然判定失败
+                wrong_chars = ["CAT", "RABBIT", "CHIIKAWA", "HACHIWARE", "USAGI"]
+                for wc in wrong_chars:
+                    if wc in result_upper:
+                        return False, f"Wrong character type detected: {wc}"
+                return True, ""
+            elif "FAIL" in result_upper:
+                # 提取失败原因
+                if ":" in result:
+                    return False, result.split(":", 1)[1].strip()[:100]
+                return False, result[:100]
+
+            # 严格模式：不确定时默认失败
+            return False, "Validation unclear - treating as fail"
+
+        except Exception as e:
+            print(f"[MangaGenerator] Validation error: {e}")
+            # 验证出错时也默认失败，宁可重试
+            return False, f"Validation error: {str(e)[:50]}"
+
+    def _build_batch_prompt(self, panels: List[Panel], language: str, theme: str = "chiikawa", batch_characters: set = None) -> str:
+        """
+        构建批量图像生成 prompt - 使用详细的剧本信息
 
         根据面板数量使用不同布局：
         - 1 panel: 单张图
         - 2 panels: 横向排列 (1x2)
         - 3-4 panels: 2x2网格
+
+        batch_characters: kumomo 主题时，当前批次出现的角色集合
         """
         lang_map = {"zh-CN": "中文", "en-US": "English", "ja-JP": "日本語"}
         lang_name = lang_map.get(language, "中文")
@@ -503,118 +567,76 @@ class MangaGenerator:
             layout_desc = "2x2 manga grid"
             positions = ["Top-Left", "Top-Right", "Bottom-Left", "Bottom-Right"]
 
-        # 构建面板描述 - 不截断文字
+        # 构建详细的面板描述
         panel_lines = []
         for i, panel in enumerate(panels):
             pos = positions[i] if i < len(positions) else f"Panel {i+1}"
+
+            # 标题
+            title = f" ({panel.panel_title})" if getattr(panel, 'panel_title', '') else ""
+
+            # 角色
             chars = ", ".join(panel.characters) if panel.characters else ""
 
-            # 完整对白，不截断
+            # 详细画面描述（最重要）
+            visual = getattr(panel, 'visual_description', '') or ""
+
+            # 对白
             dialogues = []
             if panel.dialogue:
                 for char, text in panel.dialogue.items():
                     dialogues.append(f'{char}: "{text}"')
             dialogue_str = " | ".join(dialogues) if dialogues else ""
 
+            # 旁白/解释
+            narration = getattr(panel, 'narration', '') or ""
+
+            # 背景
+            bg = getattr(panel, 'background', 'simple classroom') or "simple classroom"
+
+            # 组合成详细描述
             if pos:
-                panel_lines.append(f"{pos}: {chars} - {dialogue_str}")
+                desc = f"[{pos}{title}]\n"
             else:
-                panel_lines.append(f"Characters: {chars}\nDialogue: {dialogue_str}")
+                desc = ""
+            desc += f"Characters: {chars}\n"
+            if visual:
+                desc += f"Visual: {visual}\n"
+            if dialogue_str:
+                desc += f"Dialogue: {dialogue_str}\n"
+            if narration:
+                desc += f"Narration box: {narration}\n"
+            desc += f"Background: {bg}"
 
-        panels_text = "\n".join(panel_lines)
+            panel_lines.append(desc)
 
-        # 简洁的风格描述
+        panels_text = "\n---\n".join(panel_lines)
+
+        # 风格描述
         if theme == "ghibli":
-            style = "Ghibli (Spirited Away style, Haku in HUMAN form only)"
-        elif theme == "chibikawa":
-            style = "Chibikawa (ORIGINAL cute characters - draw EXACTLY as shown in reference images)"
+            style = "Ghibli"
+        elif theme == "kumomo":
+            style = "Kumomo"
         else:
-            style = "Chiikawa (Nagano style)"
+            style = "Chiikawa"
 
-        # 根据面板数量和语言调整文字说明
-        if num_panels == 1:
-            if is_cjk:
-                text_note = f"Text: Render {lang_name} dialogue in speech bubbles. Use LARGE, CLEAR font. Make text easily readable."
-            else:
-                text_note = f"Text: Clear speech bubbles in {lang_name}. Render text CLEARLY."
+        # 文字说明
+        if is_cjk:
+            text_note = f"Render {lang_name} text LARGE and CLEAR in speech bubbles and narration boxes."
         else:
-            if is_cjk:
-                text_note = f"Text: {lang_name} dialogue in speech bubbles. Use LARGE, CLEAR font for readability."
-            else:
-                text_note = f"Text: Clear speech bubbles in {lang_name}. Render text LEGIBLY."
+            text_note = f"Render text CLEARLY in speech bubbles and narration boxes."
 
-        # Chibikawa 原创角色描述 - 明确标注每张图片对应哪个角色（顺序必须和加载顺序一致）
-        chibikawa_char_desc = ""
-        if theme == "chibikawa":
-            # 图片加载顺序: kumo.jpeg, nezu.jpeg, papi.jpeg (按 CHIBIKAWA_IMAGES 字典顺序)
-            chibikawa_char_desc = """⚠️ REFERENCE IMAGES PROVIDED - STRICT MAPPING ⚠️
-
-I am attaching 3 reference images in this exact order:
-• Image 1: kumo (the curious student)
-• Image 2: nezu (the skeptic)
-• Image 3: papi (the mentor/professor)
-
-You MUST draw each character EXACTLY as shown in their corresponding reference image.
+        # Kumomo 原创角色参考 - 极简：只说明图片对应哪个角色
+        char_ref = ""
+        if theme == "kumomo":
+            char_ref = """[kumo looks like this: kumo.jpeg]
+[nezu looks like this: nezu.jpeg]
+[papi looks like this: papi.jpeg]
 """
 
-        # 根据布局生成不同的 prompt - 把角色描述放在最前面
-        if num_panels == 1:
-            if theme == "chibikawa":
-                prompt = f"""{chibikawa_char_desc}
----
-TASK: Create a {layout_desc} in {style} style.
+        prompt = f"""{char_ref}{layout_desc}, {style} style. {text_note}
 
-Audience: Nobel Prize scholars who LOVE cute characters.
-Balance: Academic rigor + cute charm.
-
-Panel Content:
-{panels_text}
-
-Background: Simple classroom/lab.
-{text_note}
-
-⚠️ REMINDER: Character appearance MUST match the reference images exactly. Do not improvise."""
-            else:
-                prompt = f"""{layout_desc}, {style}.
-
-Audience: Nobel Prize scholars who LOVE {style.split()[0]} characters.
-Balance: Academic rigor + cute charm.
-
-{panels_text}
-
-Background: Simple classroom/lab.
-{text_note}"""
-        else:
-            if theme == "chibikawa":
-                prompt = f"""{chibikawa_char_desc}
----
-TASK: Create a {layout_desc} in {style} style.
-
-Audience: Nobel Prize scholars who LOVE cute characters.
-Balance: Academic rigor + cute charm.
-
-Background: Simple classroom/lab (CONSISTENT across all panels!)
-{text_note}
-
-Panel Layout:
-{panels_text}
-
-Generate {layout_desc} with black borders between panels.
-
-⚠️ REMINDER: Character appearance MUST match the reference images exactly in EVERY panel. Do not improvise."""
-            else:
-                prompt = f"""{layout_desc}, {style}.
-
-Audience: Nobel Prize scholars who LOVE {style.split()[0]} characters.
-Balance: Academic rigor + cute charm.
-
-Background: Simple classroom/lab (CONSISTENT across all panels!)
-{text_note}
-
-Panels:
-{panels_text}
-
-Generate {layout_desc} with black borders between panels."""
+{panels_text}"""
 
         return prompt
 
@@ -661,69 +683,6 @@ Generate {layout_desc} with black borders between panels."""
             height=height
         )
 
-    def _build_simple_prompt(self, panel: Panel, language: str, theme: str = "chiikawa") -> str:
-        """
-        构建简化的图像生成 prompt（单个panel，备用）
-        简洁版 - 现代模型足够聪明
-        """
-        lang_map = {"zh-CN": "中文", "en-US": "English", "ja-JP": "日本語"}
-        lang_name = lang_map.get(language, "中文")
-        is_cjk = language in ["zh-CN", "ja-JP"]
-
-        # 对白 - 不截断，完整输出
-        dialogues = []
-        if panel.dialogue:
-            for char, text in panel.dialogue.items():
-                dialogues.append(f'{char}: "{text}"')
-        dialogue_str = " | ".join(dialogues) if dialogues else "(no dialogue)"
-
-        chars = ", ".join(panel.characters) if panel.characters else ""
-        if theme == "ghibli":
-            style = "Ghibli (Haku in HUMAN form)"
-        elif theme == "chibikawa":
-            style = "Chibikawa (ORIGINAL characters - match reference images EXACTLY)"
-        else:
-            style = "Chiikawa"
-
-        # CJK 语言强调文字清晰
-        if is_cjk:
-            text_note = f"Render {lang_name} text LARGE and CLEAR in speech bubbles."
-        else:
-            text_note = "Render text CLEARLY in speech bubbles."
-
-        # Chibikawa 原创角色描述 - 明确标注图片顺序
-        chibikawa_char_desc = ""
-        if theme == "chibikawa":
-            # 图片加载顺序: kumo.jpeg, nezu.jpeg, papi.jpeg
-            chibikawa_char_desc = """⚠️ REFERENCE IMAGES - STRICT MAPPING ⚠️
-
-Image 1: kumo | Image 2: nezu | Image 3: papi
-Draw each character EXACTLY as shown in their reference image.
-"""
-
-        if theme == "chibikawa":
-            prompt = f"""{chibikawa_char_desc}
----
-TASK: Single manga panel in {style} style.
-
-Characters: {chars}
-Dialogue ({lang_name}): {dialogue_str}
-Background: Simple classroom/lab.
-
-{text_note}
-
-⚠️ REMINDER: Character designs MUST match reference images exactly."""
-        else:
-            prompt = f"""Single manga panel, {style} style.
-
-Characters: {chars}
-Dialogue ({lang_name}): {dialogue_str}
-Background: Simple classroom/lab.
-
-{text_note}"""
-
-        return prompt
-
     def _load_reference_images(self, panel: Panel) -> List[ImageContent]:
         """加载参考图片（可选）"""
         reference_images = []
@@ -752,22 +711,40 @@ Background: Simple classroom/lab.
 
         return reference_images
 
-    def _load_all_chibikawa_references(self) -> List[ImageContent]:
+    def _load_all_kumomo_references(self) -> List[ImageContent]:
+        """(Legacy) 加载所有 kumomo 角色"""
+        return self._load_specific_kumomo_references(["kumo", "nezu", "papi"])
+
+    def _load_specific_kumomo_references(self, required_chars: List[str]) -> List[ImageContent]:
         """
-        加载所有 chibikawa 原创角色的参考图片
-        这是确保角色一致性的关键 - 每次图像生成都必须包含这些参考图
+        动态加载指定的 Kumomo 原创角色参考图片
+
+        只加载当前批次需要的角色，减少干扰
         """
         reference_images = []
 
-        image_paths = self.char_lib.get_all_chibikawa_reference_images()
-        print(f"[MangaGenerator] Loading {len(image_paths)} chibikawa reference images")
+        all_paths = self.char_lib.get_all_kumomo_reference_images()
+        print(f"[MangaGenerator] Filtering references for: {required_chars}")
 
-        for img_path in image_paths:
+        for img_path in all_paths:
+            path_obj = Path(img_path)
+            filename = path_obj.name.lower()
+
+            # 检查此图片是否属于所需角色
+            is_needed = False
+            for rc in required_chars:
+                if rc in filename:
+                    is_needed = True
+                    break
+
+            if not is_needed:
+                continue
+
             try:
                 with open(img_path, "rb") as f:
                     img_data = base64.b64encode(f.read()).decode()
 
-                ext = Path(img_path).suffix.lower()
+                ext = path_obj.suffix.lower()
                 mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
                 mime_type = mime_map.get(ext, "image/png")
 
@@ -776,45 +753,11 @@ Background: Simple classroom/lab.
                     mime_type=mime_type,
                     is_base64=True
                 ))
-                print(f"[MangaGenerator] Loaded reference: {Path(img_path).name}")
+                print(f"[MangaGenerator] Loaded reference: {filename}")
             except Exception as e:
-                print(f"[MangaGenerator] Failed to load chibikawa ref image {img_path}: {e}")
+                print(f"[MangaGenerator] Failed to load kumomo ref image {img_path}: {e}")
 
         return reference_images
-
-    def _get_panel_dimensions(self, layout_hint: str, max_width: int, max_height: int) -> tuple:
-        """根据布局提示确定面板尺寸"""
-        if layout_hint == "wide":
-            return max_width, max_height // 2
-        elif layout_hint == "tall":
-            return max_width // 2, max_height
-        else:
-            return max_width, int(max_width * 1.2)
-
-    def _create_placeholder_panel(self, panel: Panel, width: int, height: int) -> GeneratedPanel:
-        """创建占位符面板"""
-        img = Image.new("RGB", (width, height), "#f5f5f5")
-        draw = ImageDraw.Draw(img)
-        draw.rectangle([5, 5, width-5, height-5], outline="#cccccc", width=2)
-
-        text = f"Panel {panel.panel_number}"
-        if panel.characters:
-            text += f"\n{', '.join(panel.characters)}"
-
-        draw.text((width//2, height//2), text, fill="#999999", anchor="mm")
-
-        buffer = io.BytesIO()
-        img.save(buffer, format="PNG")
-        img_base64 = base64.b64encode(buffer.getvalue()).decode()
-
-        return GeneratedPanel(
-            panel_number=panel.panel_number,
-            image_base64=img_base64,
-            dialogue=panel.dialogue,
-            characters=panel.characters,
-            width=width,
-            height=height
-        )
 
     async def _save_partial_manga(
         self,

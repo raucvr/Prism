@@ -11,7 +11,7 @@ export type AppStage =
   | "error";
 
 export type MangaTheme =
-  | "chibikawa"  // Original characters (recommended while IP negotiation pending)
+  | "kumomo"  // Original characters (recommended while IP negotiation pending)
   | "chiikawa"
   | "ghibli";
 
@@ -61,7 +61,7 @@ const initialState = {
   file: null,
   extractedText: "",
   textPreview: "",
-  mangaTheme: "chibikawa" as MangaTheme,
+  mangaTheme: "kumomo" as MangaTheme,
   numPanels: 6,
   language: "en-US" as Language,
   title: "",

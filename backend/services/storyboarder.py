@@ -18,7 +18,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from engines import get_client, GenerationConfig
+from engines import get_client, GenerationConfig, ImageContent
 from config_loader import get_config
 
 
@@ -82,16 +82,16 @@ class Panel:
     """单个漫画格"""
     panel_number: int
     panel_type: PanelType
-    visual_description: str       # 场景描述（给 Gemini 生成图像用）
+    visual_description: str       # 详细画面内容（给 Gemini 生成图像用）
     characters: List[str]         # 出场角色
     character_emotions: Dict[str, str]  # 角色表情
-    dialogue: Dict[str, str]      # 对白
+    dialogue: Dict[str, str]      # 对白（气泡内的文字）
+    narration: str = ""           # 旁白/原理解释（画面外的说明文字）
+    panel_title: str = ""         # 面板标题（如：以前的难题）
     visual_metaphor: str = ""     # 视觉隐喻
     props: List[str] = field(default_factory=list)
     background: str = ""
     layout_hint: str = "normal"
-    # 简化后不再需要复杂的 full_image_prompt
-    # Gemini 内置 Chiikawa 知识，只需要简单描述
 
 
 @dataclass
@@ -103,6 +103,7 @@ class Storyboard:
     panels: List[Panel]
     source_document: str = ""
     language: str = "zh-CN"
+    is_fallback: bool = False  # 是否为 fallback storyboard（不应被缓存）
 
     def to_dict(self) -> dict:
         return {
@@ -161,11 +162,15 @@ class Storyboarder:
             raise ValueError(f"Input text too short ({len(text)} chars). PDF may not have been parsed correctly.")
 
         text_hash = hashlib.sha256(text.encode()).hexdigest()[:16]
+        cache_key = f"v{CACHE_VERSION}_{text_hash}_{language}_{self.character_theme}"
         print(f"[Storyboarder] Input: {len(text)} chars, hash={text_hash}, title={title}")
-        print(f"[Storyboarder] Preview: {text[:200]}...")
 
-        # 暂时禁用缓存，确保每次都重新生成
-        # TODO: 调试完成后可以重新启用缓存
+        # 检查缓存
+        if cache_key in _storyboard_cache:
+            print(f"[Storyboarder] Using cached storyboard for {cache_key}")
+            return _storyboard_cache[cache_key]
+
+        print(f"[Storyboarder] Cache miss, generating new storyboard...")
 
         client = await get_client()
 
@@ -193,6 +198,11 @@ class Storyboarder:
         # 始终用英文生成分镜，确保最高质量
         storyboard_prompt = self._build_storyboard_prompt(technical_analysis, title, "en-US")
 
+        # 加载角色参考图片（用于原创角色如 kumomo）
+        reference_images = self._load_character_reference_images()
+        if reference_images:
+            print(f"[Storyboarder] Including {len(reference_images)} character reference images")
+
         config = GenerationConfig(
             temperature=0.7,
             max_tokens=32000  # 足够生成 100+ 个分镜
@@ -200,6 +210,7 @@ class Storyboarder:
 
         response = await client.generate_text(
             prompt=storyboard_prompt,
+            images=reference_images if reference_images else None,
             config=config
         )
 
@@ -216,8 +227,15 @@ class Storyboarder:
 
         storyboard.language = language
 
-        # Cache the result
-        _storyboard_cache[cache_key] = storyboard
+        # 只缓存成功的结果（>= 10 panels 且非 fallback）
+        is_fallback = getattr(storyboard, 'is_fallback', False)
+        min_panels_to_cache = 10
+
+        if len(storyboard.panels) >= min_panels_to_cache and not is_fallback:
+            _storyboard_cache[cache_key] = storyboard
+            print(f"[Storyboarder] Cached storyboard as {cache_key} ({len(storyboard.panels)} panels)")
+        else:
+            print(f"[Storyboarder] NOT caching: {len(storyboard.panels)} panels (min={min_panels_to_cache}), fallback={is_fallback}")
 
         return storyboard
 
@@ -320,6 +338,48 @@ Output: panel_number|character|translated_dialogue
 
         return storyboard
 
+    def _load_character_reference_images(self) -> List[ImageContent]:
+        """
+        加载角色参考图片（用于原创角色）
+
+        目前支持 kumomo 主题的原创角色
+        """
+        import base64
+
+        images = []
+        image_base_path = Path(__file__).parent.parent.parent / "config" / "character_images"
+
+        if self.character_theme == "kumomo":
+            # kumomo 原创角色参考图 - 顺序必须与 prompt 一致
+            # Image 1: kumo, Image 2: nezu, Image 3: papi
+            char_images = [
+                ("kumo", "kumo.jpeg"),   # 云朵 - 好奇的学生
+                ("nezu", "nezu.jpeg"),   # 刺猬 - 怀疑论者
+                ("papi", "papi.jpeg"),   # 小狗 - 导师教授
+            ]
+
+            for char_name, filename in char_images:
+                img_path = image_base_path / filename
+                if img_path.exists():
+                    try:
+                        with open(img_path, "rb") as f:
+                            img_data = f.read()
+                        img_base64 = base64.b64encode(img_data).decode()
+
+                        # 确定 MIME 类型
+                        suffix = img_path.suffix.lower()
+                        mime_type = "image/jpeg" if suffix in [".jpg", ".jpeg"] else "image/png"
+
+                        images.append(ImageContent(
+                            data=img_base64,
+                            mime_type=mime_type
+                        ))
+                        print(f"[Storyboarder] Loaded reference image for {char_name}")
+                    except Exception as e:
+                        print(f"[Storyboarder] Failed to load {char_name} image: {e}")
+
+        return images
+
     def _build_analysis_prompt(self, text: str, title: str) -> str:
         """
         构建技术解读 prompt - 简洁版，让模型自由发挥
@@ -341,79 +401,68 @@ Copy exact values from the paper. Output in English.
         """
         构建分镜生成 prompt（始终用英文生成，后续翻译）
 
-        使用简单的自然语言格式，避免复杂 JSON 解析问题
-        支持不同主题：chiikawa, ghibli
+        使用详细的剧本格式，包含完整角色设定
         """
-        # 根据主题选择不同的角色和风格
+        # 根据主题选择不同的角色和详细设定
         if self.character_theme == "ghibli":
             style_name = "Studio Ghibli"
-            characters_desc = "Haku (wise mentor/senior researcher), Chihiro (curious student), Calcifer (witty fire spirit who adds humor)"
-            example_dialogue = """===
-Panel 1
-Characters: haku, chihiro
-Scene: Haku and Chihiro in a magical library with floating books, soft watercolor lighting
-Dialogue:
-- haku: "This study uses a randomized controlled trial with n=2,847 participants..."
-- chihiro: "What was the stratification criteria?"
-===
-Panel 2
-Characters: haku, chihiro, calcifer
-Scene: All three examining a glowing diagram projected in the air
-Dialogue:
-- haku: "The primary endpoint showed a hazard ratio of 0.73 (95% CI: 0.61-0.87)..."
-- calcifer: "Hmph! But what about the selection bias in the control group?"
-==="""
-        elif self.character_theme == "chibikawa":
-            # 原创角色主题 - 使用参考图片保证角色一致性，不用文字描述外形
-            style_name = "Chibikawa (original cute characters)"
-            characters_desc = """papi (the wise mentor/professor),
-kumo (the curious student),
-nezu (the skeptic who asks tough questions)"""
-            example_dialogue = """===
-Panel 1
-Characters: papi, kumo
-Scene: papi holding the paper, kumo looking curious, in a research lab
-Dialogue:
-- papi: "This study uses a randomized controlled trial with n=2,847 participants..."
-- kumo: "What was the stratification criteria?"
-===
-Panel 2
-Characters: papi, kumo, nezu
-Scene: All three examining a complex diagram on a whiteboard
-Dialogue:
-- papi: "The primary endpoint showed a hazard ratio of 0.73 (95% CI: 0.61-0.87)..."
-- nezu: "But what about the selection bias in the control group?"
-==="""
-        else:  # chiikawa (default)
+            characters_desc = """
+• haku - The wise mentor/professor. A calm, elegant young man in traditional clothing. Speaks thoughtfully and explains complex concepts clearly. Often gestures gracefully when teaching.
+• chihiro - The curious student. A young girl with a ponytail, eager to learn. Asks good questions, sometimes confused but always determined. Shows emotions openly.
+• calcifer - The skeptic/critic. A small fire spirit who adds humor. Questions assumptions, points out flaws, makes witty remarks. Floats around and changes colors with mood."""
+            example_chars = "haku, chihiro"
+        elif self.character_theme == "kumomo":
+            style_name = "Kumomo (original cute characters)"
+            characters_desc = """
+[kumo looks like this: kumo.jpeg] - curious student
+[nezu looks like this: nezu.jpeg] - skeptic
+[papi looks like this: papi.jpeg] - mentor/professor"""
+            example_chars = "papi, kumo"
+        else:  # chiikawa
             style_name = "Chiikawa"
-            characters_desc = "Hachiware (senior researcher/professor), Chiikawa (curious PhD student), Usagi (the skeptic who asks tough questions)"
-            example_dialogue = """===
-Panel 1
-Characters: hachiware, chiikawa
-Scene: Hachiware holding the paper, pointing at a specific figure, in a research lab
+            characters_desc = """
+• hachiware - The wise mentor/professor. A cat-like creature with a split-colored face. Calm, knowledgeable, explains concepts patiently. Often holds papers or points at diagrams.
+• chiikawa - The curious student. A small, round white creature. Innocent, easily confused but hardworking. Shows emotions with "Wa!" or "Eh?". Sweats when nervous.
+• usagi - The skeptic/critic. A rabbit with intense eyes. Energetic, questions everything with "Ura!!", sometimes chaotic but insightful. Jumps around when excited."""
+            example_chars = "hachiware, chiikawa"
+
+        example_format = f"""===
+Panel 1: The Old Problem
+Characters: {example_chars}
+Scene: Research lab with messy papers on desk
+Visual: The student stares at a pile of items (representing the research problem). The mentor holds a measuring device, explaining the traditional approach. The student looks confused with sweat drops.
 Dialogue:
-- hachiware: "This study uses a randomized controlled trial with n=2,847 participants..."
-- chiikawa: "What was the stratification criteria?"
+- {example_chars.split(", ")[0]}: "Previously, we used method X to solve this problem..."
+- {example_chars.split(", ")[1]}: "But that seems incomplete!"
+Narration: Traditional methods have limitations that this paper addresses.
 ===
-Panel 2
-Characters: hachiware, chiikawa, usagi
-Scene: All three examining a complex diagram on a whiteboard
+Panel 2: The New Idea
+Characters: {example_chars}
+Scene: Same lab, mentor now excited
+Visual: The mentor excitedly points at a new diagram. The student's eyes widen with understanding. Props show the key innovation.
 Dialogue:
-- hachiware: "The primary endpoint showed a hazard ratio of 0.73 (95% CI: 0.61-0.87)..."
-- usagi: "But what about the selection bias in the control group?"
+- {example_chars.split(", ")[0]}: "Wait! The secret is in THIS approach!"
+- {example_chars.split(", ")[1]}: "Oh! That makes sense!"
+Narration: The paper's novel contribution explained simply.
 ==="""
 
-        return f"""Create a {style_name}-style manga (40-100 panels) explaining this paper.
+        return f"""Create a {style_name}-style manga explaining this paper. Generate 20-60 detailed panels.
 
-Characters: {characters_desc}
+CHARACTER PROFILES (use these consistently throughout):
+{characters_desc}
 
-Use this analysis as source:
+Source material:
 {text[:100000]}
 
-Format (use === to separate):
-{example_dialogue}
+Format each panel with ALL these fields:
+{example_format}
 
-Generate all panels with full dialogues. Use exact numbers from the analysis."""
+Requirements:
+- Visual: Describe character poses, expressions, props, actions in detail
+- Dialogue: Natural conversation that explains the paper
+- Narration: Scientific explanation as text box
+- Keep characters IN CHARACTER throughout (mentor teaches, student asks, skeptic questions)
+- Use exact numbers and terms from the paper"""
 
     def _fix_json(self, json_str: str) -> str:
         """尝试修复常见的 JSON 格式错误"""
@@ -535,7 +584,7 @@ Generate all panels with full dialogues. Use exact numbers from the analysis."""
         )
 
     def _parse_natural_language_format(self, response: str) -> List[Panel]:
-        """Parse natural language format storyboard (=== delimited)"""
+        """Parse rich natural language format storyboard (=== delimited)"""
         panels = []
 
         # Split by ===
@@ -546,33 +595,38 @@ Generate all panels with full dialogues. Use exact numbers from the analysis."""
             if not section:
                 continue
 
-            # Parse panel number (支持 Panel 1 或 分镜 1)
-            panel_num_match = re.search(r'(?:Panel|分镜)\s*(\d+)', section, re.IGNORECASE)
-            panel_number = int(panel_num_match.group(1)) if panel_num_match else len(panels) + 1
+            # Parse panel number and title (Panel 1: The Old Problem)
+            panel_header_match = re.search(r'(?:Panel|分镜)\s*(\d+)(?:\s*[:：]\s*(.+?))?(?:\n|$)', section, re.IGNORECASE)
+            panel_number = int(panel_header_match.group(1)) if panel_header_match else len(panels) + 1
+            panel_title = panel_header_match.group(2).strip() if panel_header_match and panel_header_match.group(2) else ""
 
-            # Parse characters (支持 Characters: 或 角色:)
-            chars_match = re.search(r'(?:Characters|角色):\s*(.+)', section, re.IGNORECASE)
+            # Parse characters
+            chars_match = re.search(r'(?:Characters|角色):\s*(.+?)(?:\n|$)', section, re.IGNORECASE)
             characters = []
             if chars_match:
                 chars_str = chars_match.group(1)
                 characters = [c.strip().lower() for c in re.split(r'[,，、]', chars_str)]
 
-            # Parse scene description (支持 Scene: 或 场景:)
-            scene_match = re.search(
-                r'(?:Scene|场景):\s*(.+?)(?=\n(?:Dialogue|对白):|\n---|$)',
+            # Parse scene (简短场景描述)
+            scene_match = re.search(r'(?:Scene|场景):\s*(.+?)(?:\n|$)', section, re.IGNORECASE)
+            background = scene_match.group(1).strip() if scene_match else "simple classroom"
+
+            # Parse visual description (详细画面内容)
+            visual_match = re.search(
+                r'(?:Visual|画面|画面内容):\s*(.+?)(?=\n(?:Dialogue|对白|Narration|旁白):|\n===|$)',
                 section, re.DOTALL | re.IGNORECASE
             )
-            visual_description = scene_match.group(1).strip() if scene_match else ""
+            visual_description = visual_match.group(1).strip() if visual_match else ""
 
-            # Parse dialogue (支持 Dialogue: 或 对白:)
+            # Parse dialogue
             dialogue = {}
             dialogue_section = re.search(
-                r'(?:Dialogue|对白):\s*(.+?)(?=\n===|$)',
+                r'(?:Dialogue|对白):\s*(.+?)(?=\n(?:Narration|旁白):|\n===|$)',
                 section, re.DOTALL | re.IGNORECASE
             )
             if dialogue_section:
                 dialogue_text = dialogue_section.group(1)
-                # Match - character: "dialogue" format (支持中英文引号)
+                # Match - character: "dialogue" format
                 dialogue_matches = re.findall(
                     r'-\s*(\w+):\s*["\"\'](.+?)["\"\']',
                     dialogue_text
@@ -580,7 +634,14 @@ Generate all panels with full dialogues. Use exact numbers from the analysis."""
                 for char, text in dialogue_matches:
                     dialogue[char.lower()] = text
 
-            if visual_description or dialogue:
+            # Parse narration (旁白/原理解释)
+            narration_match = re.search(
+                r'(?:Narration|旁白|原理解释):\s*(.+?)(?=\n===|$)',
+                section, re.DOTALL | re.IGNORECASE
+            )
+            narration = narration_match.group(1).strip() if narration_match else ""
+
+            if visual_description or dialogue or narration:
                 panel = Panel(
                     panel_number=panel_number,
                     panel_type=PanelType.EXPLANATION,
@@ -588,11 +649,13 @@ Generate all panels with full dialogues. Use exact numbers from the analysis."""
                     characters=characters or self._get_default_characters(),
                     character_emotions={},
                     dialogue=dialogue,
-                    background="simple classroom"
+                    narration=narration,
+                    panel_title=panel_title,
+                    background=background
                 )
                 panels.append(panel)
 
-        # 按 panel_number 排序，确保故事顺序正确
+        # 按 panel_number 排序
         panels.sort(key=lambda p: p.panel_number)
         return panels
 
@@ -605,13 +668,15 @@ Generate all panels with full dialogues. Use exact numbers from the analysis."""
             return Panel(
                 panel_number=p.get("panel_number", default_num),
                 panel_type=panel_type,
-                visual_description=p.get("visual_description", ""),
+                visual_description=p.get("visual_description", p.get("visual", "")),
                 characters=p.get("characters", self._get_default_characters()),
                 character_emotions=p.get("character_emotions", {}),
                 dialogue=p.get("dialogue", {}),
+                narration=p.get("narration", ""),
+                panel_title=p.get("panel_title", p.get("title", "")),
                 visual_metaphor=p.get("visual_metaphor", ""),
                 props=p.get("props", []),
-                background=p.get("background", "simple classroom"),
+                background=p.get("background", p.get("scene", "simple classroom")),
                 layout_hint=p.get("layout_hint", "normal")
             )
         except Exception as e:
@@ -622,8 +687,8 @@ Generate all panels with full dialogues. Use exact numbers from the analysis."""
         """根据主题返回默认角色列表"""
         if self.character_theme == "ghibli":
             return ["haku", "chihiro"]
-        elif self.character_theme == "chibikawa":
-            return ["pip", "kumomo"]
+        elif self.character_theme == "kumomo":
+            return ["kumo", "nezu", "papi"]  # 云朵、刺猬、小狗
         return ["chiikawa", "hachiware"]
 
     def _create_fallback_storyboard(
@@ -664,34 +729,34 @@ Generate all panels with full dialogues. Use exact numbers from the analysis."""
                     background="sunny classroom"
                 )
             ]
-        elif self.character_theme == "chibikawa":
-            # 原创角色主题
+        elif self.character_theme == "kumomo":
+            # 原创角色主题 - 使用正确的角色名: kumo(云朵), nezu(刺猬), papi(小狗)
             panels = [
                 Panel(
                     panel_number=1,
                     panel_type=PanelType.TITLE,
-                    visual_description="Pip (orange puppy with floppy ears) holding a book, Kumomo (blue cloud creature with leaf sprout) looking curious",
-                    characters=["pip", "kumomo"],
-                    character_emotions={"pip": "explaining", "kumomo": "curious"},
-                    dialogue={"pip": "今天来学习一个有趣的话题！", "kumomo": "是什么呢？"},
+                    visual_description="papi (puppy mentor) holding a book, kumo (cloud creature student) looking curious",
+                    characters=["papi", "kumo"],
+                    character_emotions={"papi": "explaining", "kumo": "curious"},
+                    dialogue={"papi": "今天来学习一个有趣的话题！", "kumo": "是什么呢？"},
                     background="simple study room"
                 ),
                 Panel(
                     panel_number=2,
                     panel_type=PanelType.EXPLANATION,
-                    visual_description="Pip at whiteboard explaining, Kumomo and Pippin (hedgehog with striped tail) listening",
-                    characters=["pip", "kumomo", "pippin"],
-                    character_emotions={"pip": "explaining", "kumomo": "thinking", "pippin": "skeptical"},
-                    dialogue={"pip": "让我来解释一下～", "pippin": "这个靠谱吗..."},
+                    visual_description="papi at whiteboard explaining, kumo and nezu (hedgehog skeptic) listening",
+                    characters=["papi", "kumo", "nezu"],
+                    character_emotions={"papi": "explaining", "kumo": "thinking", "nezu": "skeptical"},
+                    dialogue={"papi": "让我来解释一下～", "nezu": "这个靠谱吗..."},
                     background="classroom"
                 ),
                 Panel(
                     panel_number=3,
                     panel_type=PanelType.CONCLUSION,
-                    visual_description="All three original characters celebrating together - Pip, Kumomo, and Pippin",
-                    characters=["pip", "kumomo", "pippin"],
-                    character_emotions={"pip": "happy", "kumomo": "happy", "pippin": "excited"},
-                    dialogue={"kumomo": "原来如此！", "pip": "做得好！", "pippin": "还不错嘛！"},
+                    visual_description="All three kumomo characters celebrating - papi, kumo, and nezu",
+                    characters=["papi", "kumo", "nezu"],
+                    character_emotions={"papi": "happy", "kumo": "happy", "nezu": "excited"},
+                    dialogue={"kumo": "原来如此！", "papi": "做得好！", "nezu": "还不错嘛！"},
                     background="festive background with sparkles"
                 )
             ]
@@ -732,7 +797,8 @@ Generate all panels with full dialogues. Use exact numbers from the analysis."""
             character_theme=self.character_theme,
             panels=panels,
             source_document=source_text[:500],
-            language=language
+            language=language,
+            is_fallback=True  # 标记为 fallback，不应被缓存
         )
 
 
@@ -740,19 +806,22 @@ Generate all panels with full dialogues. Use exact numbers from the analysis."""
 class CharacterLibrary:
     """角色库 - 主要用于加载参考图片"""
 
-    # Chibikawa 原创角色 - 直接使用 kumo, nezu, papi 作为名字
-    CHIBIKAWA_CHARACTERS = {
-        "kumo": "kumo",   # 好奇的学生
-        "nezu": "nezu",   # 怀疑论者
-        "papi": "papi",   # 导师教授
+    # Kumomo 原创角色 - 直接使用 kumo, nezu, papi 作为名字
+    KUMOMO_CHARACTERS = {
+        "kumo": "kumo",   # 云朵 - 好奇的学生
+        "nezu": "nezu",   # 刺猬 - 怀疑论者
+        "papi": "papi",   # 小狗 - 导师教授
     }
 
-    # Chibikawa 角色对应的参考图片文件
-    CHIBIKAWA_IMAGES = {
-        "kumo": "kumo.jpeg",
-        "nezu": "nezu.jpeg",
-        "papi": "papi.jpeg",
-    }
+    # Kumomo 角色对应的参考图片文件 - 顺序必须与 prompt 一致
+    # Image 1: kumo (云朵), Image 2: nezu (刺猬), Image 3: papi (小狗)
+    KUMOMO_IMAGES_ORDERED = [
+        ("kumo", "kumo.jpeg"),   # 云朵 - 好奇的学生
+        ("nezu", "nezu.jpeg"),   # 刺猬 - 怀疑论者
+        ("papi", "papi.jpeg"),   # 小狗 - 导师教授
+    ]
+    # 保留 dict 用于快速查找
+    KUMOMO_IMAGES = {name: file for name, file in KUMOMO_IMAGES_ORDERED}
 
     def __init__(self):
         self.image_base_path = Path(__file__).parent.parent.parent / "config" / "character_images"
@@ -776,11 +845,11 @@ class CharacterLibrary:
         image_paths = []
         char_name_lower = char_name.lower()
 
-        # 检查是否是 chibikawa 原创角色
-        normalized_name = self.CHIBIKAWA_CHARACTERS.get(char_name_lower)
+        # 检查是否是 kumomo 原创角色
+        normalized_name = self.KUMOMO_CHARACTERS.get(char_name_lower)
         if normalized_name:
-            # 使用 chibikawa 原创角色的参考图片
-            img_filename = self.CHIBIKAWA_IMAGES.get(normalized_name)
+            # 使用 kumomo 原创角色的参考图片
+            img_filename = self.KUMOMO_IMAGES.get(normalized_name)
             if img_filename:
                 full_path = self.image_base_path / img_filename
                 if full_path.exists():
@@ -807,10 +876,14 @@ class CharacterLibrary:
 
         return image_paths
 
-    def get_all_chibikawa_reference_images(self) -> List[str]:
-        """获取所有 chibikawa 原创角色的参考图片"""
+    def get_all_kumomo_reference_images(self) -> List[str]:
+        """
+        获取所有 kumomo 原创角色的参考图片（保持顺序）
+
+        返回顺序: kumo, nezu, papi (与 prompt 中的 Image 1/2/3 对应)
+        """
         image_paths = []
-        for char_name, img_filename in self.CHIBIKAWA_IMAGES.items():
+        for char_name, img_filename in self.KUMOMO_IMAGES_ORDERED:
             full_path = self.image_base_path / img_filename
             if full_path.exists():
                 image_paths.append(str(full_path))
@@ -845,9 +918,17 @@ _storyboarder: Optional[Storyboarder] = None
 # Cache version - increment this to invalidate all cached storyboards
 # v2: Added translation context fix for zh-CN
 # v3: Removed 25-char truncation limit for CJK
-# v4: Added chibikawa theme with original characters (Pip, Kumomo, Pippin)
+# v4: Added kumomo theme with original characters (Pip, Kumomo, Pippin)
 # v5: Fixed cache key collision - now uses full text hash instead of first 5000 chars
-CACHE_VERSION = 5
+# v6: Added character reference images to storyboard generation for original characters
+# v7: Fixed character mapping: kumo=云朵, nezu=刺猬, papi=小狗
+# v8: Fixed default characters, fallback storyboard, and validation logic for kumomo theme
+# v9: Smart caching - only cache successful results (>=10 panels, not fallback)
+# v10: Stronger reference image prompts - explicitly tell model "IMAGE 1/2/3 are input images"
+# v11: Simplified prompts - minimal text descriptions, let model focus on reference image files
+# v12: Enhanced validation with CoT (Chain-of-Thought), dynamic ref loading, character mapping
+# v13: Ultra-simple prompts: "[papi looks like this: papi.jpeg]" - let model focus on images
+CACHE_VERSION = 13
 
 # Simple storyboard cache (text hash -> storyboard)
 _storyboard_cache: Dict[str, Storyboard] = {}

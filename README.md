@@ -24,7 +24,7 @@ Prism is an open-source tool that converts complex academic papers (PDFs) into e
 
 - **PDF to Manga Conversion** - Upload any academic paper and get a beautifully illustrated manga
 - **Multiple Art Styles** - Choose from 3 unique manga themes:
-  - **Chibikawa** - Original cute characters (kumo, nezu, papi) with consistent design across all panels
+  - **Kumomo** - Original cute characters (kumo, nezu, papi) with consistent design across all panels
   - **Chiikawa** - Cute, simple characters with soft pastel colors (Nagano style)
   - **Studio Ghibli** - Dreamy watercolor atmosphere (Spirited Away style)
 - **Character Consistency** - Reference images ensure characters look the same throughout the entire manga
@@ -143,7 +143,7 @@ prism/
 │   └── package.json
 ├── config/
 │   ├── api_config.yaml.example  # Config template
-│   └── character_images/        # Reference images for Chibikawa theme
+│   └── character_images/        # Reference images for Kumomo theme
 │       ├── kumo.jpeg
 │       ├── nezu.jpeg
 │       └── papi.jpeg
@@ -154,7 +154,7 @@ prism/
 
 ### Character Consistency
 
-For the Chibikawa theme, Prism ensures character consistency by:
+For the Kumomo theme, Prism ensures character consistency by:
 1. **Reference Images** - Loading character design images for each API call
 2. **Explicit Mapping** - Telling the model exactly which image corresponds to which character
 3. **Low Temperature** - Using temperature=0.3 to reduce randomness
@@ -190,7 +190,7 @@ All panels are sorted by `panel_number` after generation to ensure the story flo
 ```bash
 curl -X POST http://localhost:8000/api/manga/from-pdf \
   -F "file=@paper.pdf" \
-  -F "theme=chibikawa" \
+  -F "theme=kumomo" \
   -F "language=zh-CN"
 ```
 
@@ -201,7 +201,7 @@ curl -X POST http://localhost:8000/api/manga/from-pdf \
 | Option | Default | Description |
 |--------|---------|-------------|
 | `default_style` | `full_color_manga` | Art style |
-| `default_theme` | `chibikawa` | Default manga theme |
+| `default_theme` | `kumomo` | Default manga theme |
 | `temperature` | `0.3` | Generation randomness (lower = more consistent) |
 
 ### Output Settings
